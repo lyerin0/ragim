@@ -313,15 +313,42 @@ async function batchThumbs(endpoint, param, ids){
 }
 
 /* ============ 렌더러 ============ */
-async function renderUserList(el, users, totalCount){
-  if(!users || users.length === 0){ el.innerHTML = '<div class="empty">표시할 유저가 없습니다.</div>'; return; }
+/* ID만 있는 유저들의 이름을 일괄 조회 (전용 워커 필요) */
+async function fillNames(users){
+  const missing = users.filter(u => !u.name && !u.displayName).map(u => Number(u.id));
+  if(missing.length === 0 || !MY_PROXY) return;
+  try{
+    const j = await api('https://users.roblox.com/v1/users', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({userIds: missing, excludeBannedUsers:false})
+    });
+    const m = {};
+    (j.data || []).forEach(x => m[x.id] = x);
+    users.forEach(u => {
+      const x = m[u.id];
+      if(x){ u.name = x.name; u.displayName = x.displayName; }
+    });
+  }catch(e){}
+}
+
+async function renderUserList(el, rawUsers, totalCount){
+  /* API 버전에 따라 응답 모양이 달라서 통일: {id}, {userId}, {user:{...}} 전부 처리 */
+  const users = (rawUsers || []).map(u => ({
+    id: u.id ?? u.userId ?? (u.user && u.user.id),
+    name: u.name ?? u.username ?? (u.user && u.user.name),
+    displayName: u.displayName ?? (u.user && u.user.displayName),
+  })).filter(u => u.id);
+
+  if(users.length === 0){ el.innerHTML = '<div class="empty">표시할 유저가 없습니다.</div>'; return; }
+
+  await fillNames(users);
   const thumbs = await headshots(users.map(u => u.id));
   let html = '<div class="ugrid">';
   for(const u of users){
     html += '<a class="ucell" href="https://www.roblox.com/users/' + u.id + '/profile" target="_blank" rel="noopener">'
       + '<img loading="lazy" src="' + esc(thumbs[u.id] || '') + '" alt="">'
-      + '<div class="n">' + esc(u.displayName || u.name) + '</div>'
-      + '<div class="d">@' + esc(u.name) + '</div></a>';
+      + '<div class="n">' + esc(u.displayName || u.name || ('ID ' + u.id)) + '</div>'
+      + '<div class="d">@' + esc(u.name || u.id) + '</div></a>';
   }
   html += '</div>';
   if(totalCount != null && totalCount > users.length){
@@ -458,7 +485,14 @@ async function loadSocial(userId, kind){
       users = (j.data || []).slice(0, 100);
       total = (j.data || []).length;
     }else{
-      const j = await api('https://friends.roblox.com/v1/users/' + userId + '/' + kind + '?limit=100&sortOrder=Desc');
+      let j;
+      try{
+        j = await api('https://friends.roblox.com/v1/users/' + userId + '/' + kind + '?limit=100&sortOrder=Desc');
+      }catch(e1){
+        /* 일부 옵션이 거부되면 옵션 없이 재시도 */
+        j = await api('https://friends.roblox.com/v1/users/' + userId + '/' + kind + '?limit=50');
+      }
+      if(j.errors) throw new Error(j.errors[0] && j.errors[0].message || '조회 거부됨');
       users = j.data || [];
       try{
         const c = await api('https://friends.roblox.com/v1/users/' + userId + '/' + kind + '/count');
